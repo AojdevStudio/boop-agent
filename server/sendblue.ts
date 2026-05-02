@@ -119,63 +119,125 @@ export function startTypingLoop(toNumber: string): () => void {
   return () => clearInterval(timer);
 }
 
+type SendblueInbound = {
+  content?: unknown;
+  from_number?: unknown;
+  is_outbound?: unknown;
+  message_handle?: unknown;
+  date_sent?: unknown;
+};
+
+async function processInboundMessage(raw: SendblueInbound, source: "webhook" | "poll"): Promise<"processed" | "skipped" | "deduped"> {
+  const content = typeof raw.content === "string" ? raw.content : "";
+  const from_number = typeof raw.from_number === "string" ? raw.from_number : "";
+  const message_handle = typeof raw.message_handle === "string" ? raw.message_handle : "";
+  if (raw.is_outbound || !content || !from_number) return "skipped";
+
+  if (message_handle) {
+    const { claimed } = await convex.mutation(api.sendblueDedup.claim, {
+      handle: message_handle,
+    });
+    if (!claimed) return "deduped";
+  }
+
+  const conversationId = `sms:${from_number}`;
+  const turnTag = Math.random().toString(36).slice(2, 8);
+  const preview = content.length > 100 ? content.slice(0, 100) + "…" : content;
+  console.log(`[turn ${turnTag}] ← ${from_number} via ${source}: ${JSON.stringify(preview)}`);
+  const start = Date.now();
+
+  broadcast("message_in", { conversationId, content, from_number, handle: message_handle });
+
+  const stopTyping = startTypingLoop(from_number);
+  try {
+    const reply = await handleUserMessage({
+      conversationId,
+      content,
+      turnTag,
+      onThinking: (t) => broadcast("thinking", { conversationId, t }),
+    });
+    if (reply) {
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+      const replyPreview = reply.length > 100 ? reply.slice(0, 100) + "…" : reply;
+      console.log(
+        `[turn ${turnTag}] → reply (${elapsed}s, ${reply.length} chars): ${JSON.stringify(replyPreview)}`,
+      );
+      await sendImessage(from_number, reply);
+      await convex.mutation(api.messages.send, {
+        conversationId,
+        role: "assistant",
+        content: reply,
+      });
+    } else {
+      console.log(`[turn ${turnTag}] → (no reply)`);
+    }
+  } catch (err) {
+    console.error(`[turn ${turnTag}] handler error`, err);
+  } finally {
+    stopTyping();
+  }
+  return "processed";
+}
+
+export function startSendbluePoller(): void {
+  const h = headers();
+  if (!h) {
+    console.warn("[sendblue-poll] missing credentials — disabled");
+    return;
+  }
+  if (process.env.SENDBLUE_POLL_INBOUND === "false") {
+    console.log("[sendblue-poll] disabled by SENDBLUE_POLL_INBOUND=false");
+    return;
+  }
+
+  const intervalMs = Number(process.env.SENDBLUE_POLL_INTERVAL_MS ?? 5000);
+  const lookbackMinutes = Number(process.env.SENDBLUE_POLL_LOOKBACK_MINUTES ?? 10);
+  let cursorMs = Date.now() - lookbackMinutes * 60_000;
+  let running = false;
+
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const qs = new URLSearchParams({
+        is_outbound: "false",
+        limit: "20",
+        order_direction: "asc",
+        created_at_gte: new Date(cursorMs - 30_000).toISOString(),
+      });
+      const res = await fetch(`https://api.sendblue.com/api/v2/messages?${qs}`, { headers: h });
+      if (!res.ok) {
+        console.warn(`[sendblue-poll] list failed ${res.status}: ${await res.text().catch(() => "")}`);
+        return;
+      }
+      const payload = (await res.json()) as { data?: SendblueInbound[] };
+      for (const msg of payload.data ?? []) {
+        const sent = typeof msg.date_sent === "string" ? Date.parse(msg.date_sent) : NaN;
+        if (Number.isFinite(sent)) cursorMs = Math.max(cursorMs, sent + 1);
+        await processInboundMessage(msg, "poll");
+      }
+    } catch (err) {
+      console.warn("[sendblue-poll] tick failed", err);
+    } finally {
+      running = false;
+    }
+  };
+
+  console.log(`[sendblue-poll] enabled every ${intervalMs}ms (lookback ${lookbackMinutes}m)`);
+  void tick();
+  setInterval(tick, intervalMs);
+}
+
 export function createSendblueRouter(): express.Router {
   const router = express.Router();
 
-  router.post("/webhook", async (req, res) => {
-    const { content, from_number, is_outbound, message_handle } = req.body ?? {};
-    if (is_outbound || !content || !from_number) {
-      res.json({ ok: true, skipped: true });
-      return;
-    }
-
-    if (message_handle) {
-      const { claimed } = await convex.mutation(api.sendblueDedup.claim, {
-        handle: message_handle,
-      });
-      if (!claimed) {
-        res.json({ ok: true, deduped: true });
-        return;
-      }
-    }
-
-    const conversationId = `sms:${from_number}`;
-    const turnTag = Math.random().toString(36).slice(2, 8);
-    const preview = content.length > 100 ? content.slice(0, 100) + "…" : content;
-    console.log(`[turn ${turnTag}] ← ${from_number}: ${JSON.stringify(preview)}`);
-    const start = Date.now();
-
-    broadcast("message_in", { conversationId, content, from_number, handle: message_handle });
+  router.post("/webhook", (req, res) => {
+    void processInboundMessage(req.body ?? {}, "webhook").catch((err) =>
+      console.error("[sendblue-webhook] processing failed", err),
+    );
+    // Acknowledge immediately so Sendblue doesn't time out long Claude turns.
+    // Deduplication by message_handle keeps any retry/poller overlap safe.
     res.json({ ok: true });
-
-    const stopTyping = startTypingLoop(from_number);
-    try {
-      const reply = await handleUserMessage({
-        conversationId,
-        content,
-        turnTag,
-        onThinking: (t) => broadcast("thinking", { conversationId, t }),
-      });
-      if (reply) {
-        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        const replyPreview = reply.length > 100 ? reply.slice(0, 100) + "…" : reply;
-        console.log(
-          `[turn ${turnTag}] → reply (${elapsed}s, ${reply.length} chars): ${JSON.stringify(replyPreview)}`,
-        );
-        await sendImessage(from_number, reply);
-        await convex.mutation(api.messages.send, {
-          conversationId,
-          role: "assistant",
-          content: reply,
-        });
-      } else {
-        console.log(`[turn ${turnTag}] → (no reply)`);
-      }
-    } catch (err) {
-      console.error(`[turn ${turnTag}] handler error`, err);
-    } finally {
-      stopTyping();
-    }
   });
 
   return router;
