@@ -26,6 +26,10 @@ export function getIntegration(name: string): IntegrationModule | undefined {
 }
 
 export async function loadIntegrations(): Promise<void> {
+  if (process.platform === "darwin" && process.env.LOCAL_MESSAGES_ENABLED !== "false") {
+    const { localMessagesIntegration } = await import("./local-messages.js");
+    registerIntegration(localMessagesIntegration);
+  }
   const { registerComposioToolkits } = await import("./composio-loader.js");
   await registerComposioToolkits();
   const loaded = [...registry.keys()];

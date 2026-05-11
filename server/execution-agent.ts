@@ -74,7 +74,8 @@ Style:
 
 Safety:
 - Anything that sends a message, creates an event, or takes an external action: call save_draft with a JSON payload instead of the real send/create tool. Return the summary so the interaction agent can show it to the user.
-- Only the interaction agent's send_draft tool commits. You never commit.`;
+- For a Local Messages text draft, use kind "local-messages.text" and payload JSON {"to":"+1555...","text":"..."} or {"chatId":123,"text":"..."}. Local Messages sends are text-only.
+- Only the interaction agent's send_draft tool commits. You never commit, except when executing an already-approved Local Messages draft using send_approved_text with the provided approval token.`;
 
 export interface SpawnOptions {
   task: string;
@@ -126,12 +127,31 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     ...integrationServers,
     ...(draftServer ? { "boop-drafts": draftServer } : {}),
   };
+  const fullVpsFilesystemAccess = process.env.BOOP_VPS_FILESYSTEM_ACCESS === "full";
+  const builtinTools = fullVpsFilesystemAccess
+    ? ({ type: "preset" as const, preset: "claude_code" as const })
+    : ["WebSearch", "WebFetch", "Skill"];
+  const autoAllowedBuiltins = fullVpsFilesystemAccess
+    ? [
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "Glob",
+        "Grep",
+        "LS",
+        "WebSearch",
+        "WebFetch",
+        "Task",
+        "Skill",
+      ]
+    : ["WebSearch", "WebFetch", "Skill"];
   const allowedTools = [
-    "WebSearch",
-    "WebFetch",
-    "Skill",
+    ...autoAllowedBuiltins,
     ...Object.keys(mcpServers).flatMap((n) => [`mcp__${n}__*`]),
   ];
+  const localMessagesToolUseIds = new Set<string>();
 
   let buffer = "";
   let usage: UsageTotals = { ...EMPTY_USAGE };
@@ -146,6 +166,11 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
         systemPrompt: EXECUTION_SYSTEM,
         model: requestedModel,
         mcpServers,
+        // `tools` controls which built-ins are available. By default, keep local
+        // filesystem/shell tools out. On the Boop Service VM, setting
+        // BOOP_VPS_FILESYSTEM_ACCESS=full enables Claude Code-style local tools
+        // for every Execution Agent, running as the service user.
+        tools: builtinTools,
         allowedTools,
         // Load .claude/skills/ so the model can invoke SKILL.md playbooks. Without
         // this the SDK runs in isolation mode and skills are silently ignored.
@@ -168,12 +193,16 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
             const accounts = extractAccounts(block.input);
             const acctSuffix = accounts.length ? ` [${accounts.join(", ")}]` : "";
             logAgent(`tool: ${toolShort}${acctSuffix}`);
+            const isLocalMessages = block.name.startsWith("mcp__local-messages__");
+            if (isLocalMessages) localMessagesToolUseIds.add(block.id);
             await convex.mutation(api.agents.addLog, {
               agentId,
               logType: "tool_use",
               toolName: block.name,
               ...(accounts.length ? { accounts } : {}),
-              content: JSON.stringify(block.input).slice(0, 2000),
+              content: isLocalMessages
+                ? JSON.stringify({ redacted: true, metadataOnly: true, tool: block.name }).slice(0, 2000)
+                : JSON.stringify(block.input).slice(0, 2000),
             });
             broadcast("agent_tool", { agentId, toolName: block.name, accounts });
           }
@@ -186,10 +215,14 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
                   .map((c: { type: string; text?: string }) => (c.type === "text" ? (c.text ?? "") : ""))
                   .join("")
               : String(block.content ?? "");
+            const toolUseId = (block as { tool_use_id?: string }).tool_use_id;
+            const redact = toolUseId ? localMessagesToolUseIds.has(toolUseId) : false;
             await convex.mutation(api.agents.addLog, {
               agentId,
               logType: "tool_result",
-              content: text.slice(0, 2000),
+              content: redact
+                ? JSON.stringify({ redacted: true, metadataOnly: true, chars: text.length }).slice(0, 2000)
+                : text.slice(0, 2000),
             });
           }
         }

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { spawnExecutionAgent } from "./execution-agent.js";
+import { attachmentsHash, randomApprovalToken, textHash, tokenHash } from "./local-messages/approval.js";
 
 function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -95,14 +96,57 @@ export function createDraftDecisionMcp(conversationId: string) {
               ],
             };
           }
-          await convex.mutation(api.drafts.setStatus, {
-            draftId: args.draftId,
-            status: "sent",
-          });
+          let approvalBlock = "";
+          if (draft.kind === "local-messages.text") {
+            let parsed: { to?: string; chatId?: number; text?: string };
+            try {
+              parsed = JSON.parse(draft.payload) as { to?: string; chatId?: number; text?: string };
+            } catch {
+              return {
+                content: [{ type: "text" as const, text: "Local Messages draft payload is invalid JSON." }],
+              };
+            }
+            if (!parsed.text || (!parsed.to && parsed.chatId === undefined)) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: "Local Messages draft payload must include text and either to or chatId.",
+                  },
+                ],
+              };
+            }
+            const recipient = parsed.chatId !== undefined ? `chat:${parsed.chatId}` : `to:${parsed.to}`;
+            const approvalToken = randomApprovalToken();
+            const approved = await convex.mutation(api.drafts.approveLocalMessage, {
+              draftId: args.draftId,
+              tokenHash: tokenHash(approvalToken),
+              recipient,
+              textHash: textHash(parsed.text),
+              attachmentsHash: attachmentsHash([]),
+              expiresAt: Date.now() + 10 * 60 * 1000,
+            });
+            if (!approved) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: "Local Messages draft could not be approved. It may not be pending or may have the wrong draft kind.",
+                  },
+                ],
+              };
+            }
+            approvalBlock = `\nlocalMessagesApprovalToken: ${approvalToken}\nlocalMessagesRecipient: ${recipient}\nUse the local-messages send_approved_text tool with exactly this draftId, token, recipient, and message text. Do not modify the text.`;
+          } else {
+            await convex.mutation(api.drafts.setStatus, {
+              draftId: args.draftId,
+              status: "sent",
+            });
+          }
           const task = `Execute this approved draft. Use the matching integration tool to actually send/create it.
 kind: ${draft.kind}
 summary: ${draft.summary}
-payload JSON: ${draft.payload}`;
+payload JSON: ${draft.payload}${approvalBlock}`;
           const res = await spawnExecutionAgent({
             task,
             integrations: args.integrations,

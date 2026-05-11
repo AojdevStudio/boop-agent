@@ -184,6 +184,12 @@ export default defineSchema({
       v.literal("rejected"),
       v.literal("expired"),
     ),
+    approvalTokenHash: v.optional(v.string()),
+    approvalRecipient: v.optional(v.string()),
+    approvalTextHash: v.optional(v.string()),
+    approvalAttachmentsHash: v.optional(v.string()),
+    approvalExpiresAt: v.optional(v.number()),
+    approvalCreatedAt: v.optional(v.number()),
     createdAt: v.number(),
     decidedAt: v.optional(v.number()),
   })

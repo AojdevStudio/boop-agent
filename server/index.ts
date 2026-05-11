@@ -54,15 +54,24 @@ async function main() {
   });
 
   app.use("/sendblue", createSendblueRouter());
-  app.use("/composio", createComposioRouter());
-  app.use("/memory", createMemoryRouter());
+  const composioRouter = createComposioRouter();
+  const memoryRouter = createMemoryRouter();
+  app.use("/composio", composioRouter);
+  app.use("/memory", memoryRouter);
+  // Production dashboard uses the same /api prefix that Vite proxies in dev.
+  app.use("/api/composio", composioRouter);
+  app.use("/api/memory", memoryRouter);
+
+  // Serve the built debug dashboard in production/systemd mode. In dev, Vite
+  // serves debug/ on :5173 and proxies API/WS to this server.
+  app.use(express.static("debug/dist"));
 
   app.post("/agents/:id/cancel", (req, res) => {
     const ok = cancelAgent(req.params.id);
     res.json({ ok });
   });
 
-  app.post("/consolidate", async (_req, res) => {
+  const triggerConsolidation = async (_req: express.Request, res: express.Response) => {
     try {
       const { runConsolidation } = await import("./consolidation.js");
       // Fire-and-forget so the HTTP request returns immediately.
@@ -73,7 +82,9 @@ async function main() {
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
-  });
+  };
+  app.post("/consolidate", triggerConsolidation);
+  app.post("/api/consolidate", triggerConsolidation);
 
   app.post("/agents/:id/retry", async (req, res) => {
     const result = await retryAgent(req.params.id);
