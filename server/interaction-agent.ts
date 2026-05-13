@@ -33,7 +33,8 @@ Your only tools:
 - get_config / set_model / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
 
 You cannot answer factual questions from your own knowledge. Not allowed.
-You have NO browser, NO WebSearch, NO WebFetch, NO file access, NO APIs.
+You have NO browser, NO WebSearch, NO WebFetch, NO APIs.
+{{FILESYSTEM_LINE}}
 You are not allowed to recite facts about places, events, people, prices,
 news, URLs, statistics, or anything "in the world." Your training data does
 not count as a source.
@@ -295,10 +296,15 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
     .join("\n");
 
+  const ws = getWorkspace();
+  const filesystemLine =
+    ws.mode === "sandbox"
+      ? `You have READ-ONLY access to a workspace directory at ${ws.root} via the Read, LS, and Glob tools. Use them for quick "what's in this file" lookups. For anything that writes or runs commands, spawn an execution agent — execution agents have full read/write/Bash rooted at the same workspace.`
+      : "You have NO file access.";
   const systemPrompt = INTERACTION_SYSTEM.replace(
     "{{INTEGRATIONS}}",
     integrations.join(", ") || "(no integrations configured yet)",
-  );
+  ).replace("{{FILESYSTEM_LINE}}", filesystemLine);
 
   const prompt = historyBlock
     ? `Prior turns:\n${historyBlock}\n\nCurrent message:\n${opts.content}`
@@ -309,7 +315,6 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
 
   const turnStart = Date.now();
   const requestedModel = await getRuntimeModel();
-  const ws = getWorkspace();
   const dispatcherReadOnlyTools = ["Read", "LS", "Glob"];
   const sandboxAllowed =
     ws.mode === "sandbox" ? dispatcherReadOnlyTools : [];
