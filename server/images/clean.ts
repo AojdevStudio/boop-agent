@@ -26,6 +26,7 @@ export async function runImageCleanup(): Promise<{ deleted: number; kept: number
   for (const msg of batch) {
     const ids = (msg.imageStorageIds ?? []) as string[];
     for (const storageId of ids) {
+      // TODO(codegen): drop cast once schema push regenerates Convex API.
       const anchored = await convex.query(api.memoryRecords.hasImageRef, {
         storageId: storageId as never,
       });
@@ -33,9 +34,11 @@ export async function runImageCleanup(): Promise<{ deleted: number; kept: number
         kept++;
         continue;
       }
+      // TODO(codegen): drop cast once schema push regenerates Convex API.
       await convex.mutation(api.messages.deleteImageBytes, {
         storageId: storageId as never,
       });
+      // TODO(codegen): drop cast once schema push regenerates Convex API.
       await convex.mutation(api.messages.clearMessageImage, {
         messageId: msg._id,
         storageId: storageId as never,
