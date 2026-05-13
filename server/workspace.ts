@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import type { CanUseTool, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 
 export type WorkspaceMode = "off" | "sandbox" | "full";
 
@@ -93,4 +94,43 @@ let cached: WorkspaceConfig | null = null;
 export function getWorkspace(): WorkspaceConfig {
   if (!cached) cached = resolveWorkspace();
   return cached;
+}
+
+const PATH_GUARDED_TOOLS = new Set([
+  "Read",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "Glob",
+  "Grep",
+  "LS",
+]);
+
+export function makeWorkspaceCanUseTool(
+  isPathInWorkspace: (p: string) => boolean,
+  workspaceRoot: string,
+): CanUseTool {
+  return async (toolName, input): Promise<PermissionResult> => {
+    if (!PATH_GUARDED_TOOLS.has(toolName)) {
+      return { behavior: "allow", updatedInput: input };
+    }
+    const pathArg =
+      typeof input.path === "string"
+        ? input.path
+        : typeof input.file_path === "string"
+        ? input.file_path
+        : typeof input.pattern === "string"
+        ? input.pattern
+        : undefined;
+    if (!pathArg) {
+      return { behavior: "allow", updatedInput: input };
+    }
+    if (!isPathInWorkspace(pathArg)) {
+      return {
+        behavior: "deny",
+        message: `path outside workspace: ${pathArg} — workspace is rooted at ${workspaceRoot}`,
+      };
+    }
+    return { behavior: "allow", updatedInput: input };
+  };
 }

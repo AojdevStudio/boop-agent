@@ -1,5 +1,4 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { CanUseTool, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { broadcast } from "./broadcast.js";
@@ -7,48 +6,9 @@ import { buildMcpServersForIntegrations, listIntegrations } from "./integrations
 import { createDraftStagingMcp } from "./draft-tools.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeModel } from "./runtime-config.js";
-import { getWorkspace } from "./workspace.js";
+import { getWorkspace, makeWorkspaceCanUseTool } from "./workspace.js";
 
 const running = new Map<string, AbortController>();
-
-const PATH_GUARDED_TOOLS = new Set([
-  "Read",
-  "Write",
-  "Edit",
-  "MultiEdit",
-  "Glob",
-  "Grep",
-  "LS",
-]);
-
-export function makeWorkspaceCanUseTool(
-  isPathInWorkspace: (p: string) => boolean,
-  workspaceRoot: string,
-): CanUseTool {
-  return async (toolName, input): Promise<PermissionResult> => {
-    if (!PATH_GUARDED_TOOLS.has(toolName)) {
-      return { behavior: "allow", updatedInput: input };
-    }
-    const pathArg =
-      typeof input.path === "string"
-        ? input.path
-        : typeof input.file_path === "string"
-        ? input.file_path
-        : typeof input.pattern === "string"
-        ? input.pattern
-        : undefined;
-    if (!pathArg) {
-      return { behavior: "allow", updatedInput: input };
-    }
-    if (!isPathInWorkspace(pathArg)) {
-      return {
-        behavior: "deny",
-        message: `path outside workspace: ${pathArg} — workspace is rooted at ${workspaceRoot}`,
-      };
-    }
-    return { behavior: "allow", updatedInput: input };
-  };
-}
 
 function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;

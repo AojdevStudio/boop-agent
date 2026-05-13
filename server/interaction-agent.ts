@@ -1,4 +1,5 @@
 import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
@@ -12,6 +13,7 @@ import { getRuntimeModel } from "./runtime-config.js";
 import { broadcast } from "./broadcast.js";
 import { sendImessage } from "./sendblue.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
+import { getWorkspace, makeWorkspaceCanUseTool } from "./workspace.js";
 
 const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from iMessage.
 
@@ -307,6 +309,18 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
 
   const turnStart = Date.now();
   const requestedModel = await getRuntimeModel();
+  const ws = getWorkspace();
+  const dispatcherReadOnlyTools = ["Read", "LS", "Glob"];
+  const sandboxAllowed =
+    ws.mode === "sandbox" ? dispatcherReadOnlyTools : [];
+  const sandboxDisallowedRemoval = new Set(
+    ws.mode === "sandbox" ? dispatcherReadOnlyTools : [],
+  );
+  const sandboxCanUseTool: CanUseTool | undefined =
+    ws.mode === "sandbox"
+      ? makeWorkspaceCanUseTool(ws.isPathInWorkspace, ws.root)
+      : undefined;
+  const sandboxCwd = ws.mode === "sandbox" ? ws.root : undefined;
   let reply = "";
   let usage: UsageTotals = { ...EMPTY_USAGE };
   try {
@@ -323,7 +337,9 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           "boop-ack": ackServer,
           "boop-self": selfServer,
         },
+        ...(sandboxAllowed.length > 0 ? { tools: sandboxAllowed } : {}),
         allowedTools: [
+          ...sandboxAllowed,
           "mcp__boop-memory__write_memory",
           "mcp__boop-memory__recall",
           "mcp__boop-spawn__spawn_agent",
@@ -349,15 +365,17 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           "WebSearch",
           "WebFetch",
           "Bash",
-          "Read",
           "Write",
           "Edit",
-          "Glob",
           "Grep",
           "Agent",
+          ...(sandboxDisallowedRemoval.has("Read") ? [] : ["Read"]),
+          ...(sandboxDisallowedRemoval.has("Glob") ? [] : ["Glob"]),
           "Skill",
         ],
         permissionMode: "bypassPermissions",
+        ...(sandboxCanUseTool ? { canUseTool: sandboxCanUseTool } : {}),
+        ...(sandboxCwd ? { cwd: sandboxCwd } : {}),
       },
     })) {
       if (msg.type === "assistant") {
