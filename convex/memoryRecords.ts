@@ -285,3 +285,17 @@ export const countsByTier = query({
     };
   },
 });
+
+export const hasImageRef = query({
+  args: { storageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    // Linear scan is fine while memory volume is small; for large user
+    // bases, add an index on imageStorageIds via a secondary join table.
+    const all = await ctx.db.query("memoryRecords").collect();
+    return all.some(
+      (r) =>
+        Array.isArray(r.imageStorageIds) &&
+        r.imageStorageIds.includes(args.storageId),
+    );
+  },
+});

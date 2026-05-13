@@ -71,3 +71,39 @@ export const getStorageUrl = query({
     return await ctx.storage.getUrl(args.storageId);
   },
 });
+
+export const expiredWithImages = query({
+  args: { olderThanMs: v.number(), limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const cutoff = args.olderThanMs;
+    const rows = await ctx.db
+      .query("messages")
+      .withIndex("by_createdAt", (q) => q.lt("createdAt", cutoff))
+      .order("asc")
+      .take(args.limit ?? 200);
+    return rows.filter(
+      (r) => Array.isArray(r.imageStorageIds) && r.imageStorageIds.length > 0,
+    );
+  },
+});
+
+export const clearMessageImage = mutation({
+  args: { messageId: v.id("messages"), storageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.messageId);
+    if (!row || !row.imageStorageIds) return;
+    const remaining = row.imageStorageIds.filter((id) => id !== args.storageId);
+    if (remaining.length === 0) {
+      await ctx.db.patch(args.messageId, { imageStorageIds: undefined });
+    } else {
+      await ctx.db.patch(args.messageId, { imageStorageIds: remaining });
+    }
+  },
+});
+
+export const deleteImageBytes = mutation({
+  args: { storageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    await ctx.storage.delete(args.storageId);
+  },
+});
