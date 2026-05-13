@@ -199,6 +199,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     role: inboundRole,
     content: opts.content,
     turnId,
+    // TODO(codegen): drop cast once schema push regenerates Convex API.
     imageStorageIds: inboundImageStorageIds.length > 0
       ? (inboundImageStorageIds as never)
       : undefined,

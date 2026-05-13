@@ -153,10 +153,10 @@ async function processInboundMessage(raw: SendblueInbound, source: "webhook" | "
     if (!claimed) return "deduped";
   }
 
+  const ingestResults = await Promise.all(rawUrls.map(ingestSendblueImage));
   const ingested: IngestedImage[] = [];
   const ingestErrors: string[] = [];
-  for (const url of rawUrls) {
-    const r = await ingestSendblueImage(url);
+  for (const r of ingestResults) {
     if (r.ok) ingested.push(r.image);
     else ingestErrors.push(r.reason);
   }
@@ -256,44 +256,54 @@ type IngestedImage = { storageId: string; mediaType: ImageMediaType };
 export async function ingestSendblueImage(
   url: string,
 ): Promise<{ ok: true; image: IngestedImage } | { ok: false; reason: string }> {
-  let head: Response;
+  let res: Response;
   try {
-    head = await fetch(url, {
+    res = await fetch(url, {
       method: "GET",
       signal: AbortSignal.timeout(10_000),
     });
   } catch (err) {
     return { ok: false, reason: `download failed: ${String(err)}` };
   }
-  if (!head.ok) {
-    return { ok: false, reason: `download failed: HTTP ${head.status}` };
+  if (!res.ok) {
+    return { ok: false, reason: `download failed: HTTP ${res.status}` };
   }
-  const lenHeader = head.headers.get("content-length");
+  const lenHeader = res.headers.get("content-length");
   const contentLength = lenHeader ? Number(lenHeader) : undefined;
   const check = validateImageHeader({
-    contentType: head.headers.get("content-type") ?? undefined,
+    contentType: res.headers.get("content-type") ?? undefined,
     contentLength,
   });
   if (!check.ok) {
-    head.body?.cancel().catch(() => undefined);
+    res.body?.cancel().catch(() => undefined);
     return { ok: false, reason: check.reason };
   }
-  const buf = await head.arrayBuffer();
+  let buf: ArrayBuffer;
+  try {
+    buf = await res.arrayBuffer();
+  } catch (err) {
+    return { ok: false, reason: `download failed: ${String(err)}` };
+  }
   if (buf.byteLength > MAX_IMAGE_BYTES) {
     return { ok: false, reason: `image too large: ${buf.byteLength} bytes` };
   }
 
-  const uploadUrl = await convex.mutation(api.messages.generateUploadUrl, {});
-  const upload = await fetch(uploadUrl, {
-    method: "POST",
-    headers: { "Content-Type": check.mediaType },
-    body: buf,
-  });
-  if (!upload.ok) {
-    return { ok: false, reason: `upload failed: HTTP ${upload.status}` };
+  try {
+    const uploadUrl = await convex.mutation(api.messages.generateUploadUrl, {});
+    const upload = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": check.mediaType },
+      body: buf,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!upload.ok) {
+      return { ok: false, reason: `upload failed: HTTP ${upload.status}` };
+    }
+    const { storageId } = (await upload.json()) as { storageId: string };
+    return { ok: true, image: { storageId, mediaType: check.mediaType } };
+  } catch (err) {
+    return { ok: false, reason: `upload failed: ${String(err)}` };
   }
-  const { storageId } = (await upload.json()) as { storageId: string };
-  return { ok: true, image: { storageId, mediaType: check.mediaType } };
 }
 
 export function createSendblueRouter(): express.Router {

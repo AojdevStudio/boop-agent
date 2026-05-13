@@ -1,3 +1,7 @@
+import { api } from "../../convex/_generated/api.js";
+import { convex } from "../convex-client.js";
+import { ALLOWED_IMAGE_MIME } from "./mime.js";
+
 export interface ImageBytes {
   bytes: Buffer;
   mediaType: string;
@@ -42,15 +46,22 @@ export async function buildPromptWithImages(
 }
 
 export async function fetchStoredBytes(storageId: string): Promise<ImageBytes> {
-  const { api } = await import("../../convex/_generated/api.js");
-  const { convex } = await import("../convex-client.js");
+  // TODO(codegen): drop the `as never` once the regenerated Convex API
+  // reflects the new getStorageUrl query (blocked on schema push).
   const url = await convex.query(api.messages.getStorageUrl, {
     storageId: storageId as never,
   });
   if (!url) throw new Error(`image storage missing: ${storageId}`);
   const res = await fetch(url);
   if (!res.ok) throw new Error(`image fetch failed: HTTP ${res.status}`);
-  const ct = res.headers.get("content-type") ?? "application/octet-stream";
+  const rawCt = res.headers.get("content-type") ?? "";
+  const mediaType = rawCt.split(";")[0]!.trim().toLowerCase();
+  // Symmetry with ingest: only accept image MIMEs we'd have ingested.
+  // If Convex CDN returned anything else, reject — better than poisoning
+  // the Anthropic call with a bogus media_type.
+  if (!ALLOWED_IMAGE_MIME.has(mediaType)) {
+    throw new Error(`unexpected stored media_type: ${rawCt || "(empty)"}`);
+  }
   const bytes = Buffer.from(await res.arrayBuffer());
-  return { bytes, mediaType: ct };
+  return { bytes, mediaType };
 }
