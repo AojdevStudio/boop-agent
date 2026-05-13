@@ -1,4 +1,5 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { CanUseTool, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { broadcast } from "./broadcast.js";
@@ -6,8 +7,48 @@ import { buildMcpServersForIntegrations, listIntegrations } from "./integrations
 import { createDraftStagingMcp } from "./draft-tools.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeModel } from "./runtime-config.js";
+import { getWorkspace } from "./workspace.js";
 
 const running = new Map<string, AbortController>();
+
+const PATH_GUARDED_TOOLS = new Set([
+  "Read",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "Glob",
+  "Grep",
+  "LS",
+]);
+
+export function makeWorkspaceCanUseTool(
+  isPathInWorkspace: (p: string) => boolean,
+  workspaceRoot: string,
+): CanUseTool {
+  return async (toolName, input): Promise<PermissionResult> => {
+    if (!PATH_GUARDED_TOOLS.has(toolName)) {
+      return { behavior: "allow", updatedInput: input };
+    }
+    const pathArg =
+      typeof input.path === "string"
+        ? input.path
+        : typeof input.file_path === "string"
+        ? input.file_path
+        : typeof input.pattern === "string"
+        ? input.pattern
+        : undefined;
+    if (!pathArg) {
+      return { behavior: "allow", updatedInput: input };
+    }
+    if (!isPathInWorkspace(pathArg)) {
+      return {
+        behavior: "deny",
+        message: `path outside workspace: ${pathArg} — workspace is rooted at ${workspaceRoot}`,
+      };
+    }
+    return { behavior: "allow", updatedInput: input };
+  };
+}
 
 function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -127,30 +168,54 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     ...integrationServers,
     ...(draftServer ? { "boop-drafts": draftServer } : {}),
   };
-  const fullVpsFilesystemAccess = process.env.BOOP_VPS_FILESYSTEM_ACCESS === "full";
-  const builtinTools = fullVpsFilesystemAccess
-    ? ({ type: "preset" as const, preset: "claude_code" as const })
-    : ["WebSearch", "WebFetch", "Skill"];
-  const autoAllowedBuiltins = fullVpsFilesystemAccess
-    ? [
-        "Bash",
-        "Read",
-        "Write",
-        "Edit",
-        "MultiEdit",
-        "Glob",
-        "Grep",
-        "LS",
-        "WebSearch",
-        "WebFetch",
-        "Task",
-        "Skill",
-      ]
-    : ["WebSearch", "WebFetch", "Skill"];
+  const ws = getWorkspace();
+  const sandboxBuiltinNames = [
+    "Read",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "Glob",
+    "Grep",
+    "LS",
+    "Bash",
+    "WebSearch",
+    "WebFetch",
+    "Skill",
+  ];
+  const builtinTools =
+    ws.mode === "full"
+      ? ({ type: "preset" as const, preset: "claude_code" as const })
+      : ws.mode === "sandbox"
+      ? sandboxBuiltinNames
+      : ["WebSearch", "WebFetch", "Skill"];
+  const autoAllowedBuiltins =
+    ws.mode === "full"
+      ? [
+          "Bash",
+          "Read",
+          "Write",
+          "Edit",
+          "MultiEdit",
+          "Glob",
+          "Grep",
+          "LS",
+          "WebSearch",
+          "WebFetch",
+          "Task",
+          "Skill",
+        ]
+      : ws.mode === "sandbox"
+      ? sandboxBuiltinNames
+      : ["WebSearch", "WebFetch", "Skill"];
   const allowedTools = [
     ...autoAllowedBuiltins,
     ...Object.keys(mcpServers).flatMap((n) => [`mcp__${n}__*`]),
   ];
+  const canUseTool =
+    ws.mode === "sandbox"
+      ? makeWorkspaceCanUseTool(ws.isPathInWorkspace, ws.root)
+      : undefined;
+  const sdkCwd = ws.mode === "sandbox" ? ws.root : undefined;
   const localMessagesToolUseIds = new Set<string>();
 
   let buffer = "";
@@ -177,6 +242,8 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
         settingSources: ["project"],
         permissionMode: "bypassPermissions",
         abortController: abort,
+        ...(canUseTool ? { canUseTool } : {}),
+        ...(sdkCwd ? { cwd: sdkCwd } : {}),
       },
     })) {
       if (msg.type === "assistant") {
