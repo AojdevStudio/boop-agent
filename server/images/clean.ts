@@ -52,9 +52,14 @@ export function startImageCleanup(): () => void {
     console.log("[image-cleanup] disabled (BOOP_IMAGE_RETENTION_DAYS=0)");
     return () => undefined;
   }
-  const intervalMs = Number(
-    process.env.BOOP_IMAGE_CLEANUP_INTERVAL_MS ?? 12 * 60 * 60 * 1000,
-  );
+  const rawIntervalMs = process.env.BOOP_IMAGE_CLEANUP_INTERVAL_MS;
+  const parsed = rawIntervalMs === undefined ? 12 * 60 * 60 * 1000 : Number(rawIntervalMs);
+  const intervalMs = Number.isFinite(parsed) && parsed > 0 ? parsed : 12 * 60 * 60 * 1000;
+  if (rawIntervalMs !== undefined && intervalMs !== Number(rawIntervalMs)) {
+    console.warn(
+      `[image-cleanup] ignoring invalid BOOP_IMAGE_CLEANUP_INTERVAL_MS="${rawIntervalMs}", falling back to 12h`,
+    );
+  }
   console.log(
     `[image-cleanup] enabled (retention=${getImageRetentionDays()}d, interval=${intervalMs}ms)`,
   );
