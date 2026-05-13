@@ -3,6 +3,7 @@ import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { broadcast } from "./broadcast.js";
+import { validateImageHeader, MAX_IMAGE_BYTES, type ImageMediaType } from "./images/mime.js";
 
 const API_BASE = "https://api.sendblue.com/api";
 const MAX_CHUNK = 2900;
@@ -125,19 +126,39 @@ type SendblueInbound = {
   is_outbound?: unknown;
   message_handle?: unknown;
   date_sent?: unknown;
+  media_url?: unknown; // single image (legacy)
+  media_urls?: unknown; // array of images (current)
 };
 
 async function processInboundMessage(raw: SendblueInbound, source: "webhook" | "poll"): Promise<"processed" | "skipped" | "deduped"> {
   const content = typeof raw.content === "string" ? raw.content : "";
   const from_number = typeof raw.from_number === "string" ? raw.from_number : "";
   const message_handle = typeof raw.message_handle === "string" ? raw.message_handle : "";
-  if (raw.is_outbound || !content || !from_number) return "skipped";
+  const rawUrls: string[] = [];
+  if (Array.isArray(raw.media_urls)) {
+    for (const u of raw.media_urls) {
+      if (typeof u === "string" && u.length > 0) rawUrls.push(u);
+    }
+  } else if (typeof raw.media_url === "string" && raw.media_url.length > 0) {
+    rawUrls.push(raw.media_url);
+  }
+  if (raw.is_outbound || !from_number || (!content && rawUrls.length === 0)) {
+    return "skipped";
+  }
 
   if (message_handle) {
     const { claimed } = await convex.mutation(api.sendblueDedup.claim, {
       handle: message_handle,
     });
     if (!claimed) return "deduped";
+  }
+
+  const ingested: IngestedImage[] = [];
+  const ingestErrors: string[] = [];
+  for (const url of rawUrls) {
+    const r = await ingestSendblueImage(url);
+    if (r.ok) ingested.push(r.image);
+    else ingestErrors.push(r.reason);
   }
 
   const conversationId = `sms:${from_number}`;
@@ -154,6 +175,8 @@ async function processInboundMessage(raw: SendblueInbound, source: "webhook" | "
       conversationId,
       content,
       turnTag,
+      images: ingested,
+      mediaError: ingestErrors.length > 0 ? ingestErrors.join("; ") : undefined,
       onThinking: (t) => broadcast("thinking", { conversationId, t }),
     });
     if (reply) {
@@ -226,6 +249,51 @@ export function startSendbluePoller(): void {
   console.log(`[sendblue-poll] enabled every ${intervalMs}ms (lookback ${lookbackMinutes}m)`);
   void tick();
   setInterval(tick, intervalMs);
+}
+
+type IngestedImage = { storageId: string; mediaType: ImageMediaType };
+
+export async function ingestSendblueImage(
+  url: string,
+): Promise<{ ok: true; image: IngestedImage } | { ok: false; reason: string }> {
+  let head: Response;
+  try {
+    head = await fetch(url, {
+      method: "GET",
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err) {
+    return { ok: false, reason: `download failed: ${String(err)}` };
+  }
+  if (!head.ok) {
+    return { ok: false, reason: `download failed: HTTP ${head.status}` };
+  }
+  const lenHeader = head.headers.get("content-length");
+  const contentLength = lenHeader ? Number(lenHeader) : undefined;
+  const check = validateImageHeader({
+    contentType: head.headers.get("content-type") ?? undefined,
+    contentLength,
+  });
+  if (!check.ok) {
+    head.body?.cancel().catch(() => undefined);
+    return { ok: false, reason: check.reason };
+  }
+  const buf = await head.arrayBuffer();
+  if (buf.byteLength > MAX_IMAGE_BYTES) {
+    return { ok: false, reason: `image too large: ${buf.byteLength} bytes` };
+  }
+
+  const uploadUrl = await convex.mutation(api.messages.generateUploadUrl, {});
+  const upload = await fetch(uploadUrl, {
+    method: "POST",
+    headers: { "Content-Type": check.mediaType },
+    body: buf,
+  });
+  if (!upload.ok) {
+    return { ok: false, reason: `upload failed: HTTP ${upload.status}` };
+  }
+  const { storageId } = (await upload.json()) as { storageId: string };
+  return { ok: true, image: { storageId, mediaType: check.mediaType } };
 }
 
 export function createSendblueRouter(): express.Router {

@@ -8,6 +8,8 @@ export const send = mutation({
     content: v.string(),
     agentId: v.optional(v.string()),
     turnId: v.optional(v.string()),
+    imageStorageIds: v.optional(v.array(v.id("_storage"))),
+    mediaError: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -53,5 +55,19 @@ export const recent = query({
       .order("desc")
       .take(args.limit ?? 20);
     return msgs.reverse();
+  },
+});
+
+export const generateUploadUrl = mutation({
+  args: {},
+  handler: async (ctx) => {
+    return await ctx.storage.generateUploadUrl();
+  },
+});
+
+export const getStorageUrl = query({
+  args: { storageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    return await ctx.storage.getUrl(args.storageId);
   },
 });

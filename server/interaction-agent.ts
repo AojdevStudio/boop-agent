@@ -14,6 +14,7 @@ import { broadcast } from "./broadcast.js";
 import { sendImessage } from "./sendblue.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getWorkspace, makeWorkspaceCanUseTool } from "./workspace.js";
+import { buildPromptWithImages, fetchStoredBytes } from "./images/content-blocks.js";
 
 const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from iMessage.
 
@@ -179,6 +180,8 @@ interface HandleOpts {
   // role=user, so the synthetic notice the IA receives doesn't pollute the
   // user-message history. Defaults to "user".
   kind?: "user" | "proactive";
+  images?: Array<{ storageId: string; mediaType: string }>;
+  mediaError?: string;
 }
 
 function randomId(prefix: string): string {
@@ -190,11 +193,16 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
   const integrations = availableIntegrations();
 
   const inboundRole = opts.kind === "proactive" ? "system" : "user";
+  const inboundImageStorageIds = (opts.images ?? []).map((i) => i.storageId);
   await convex.mutation(api.messages.send, {
     conversationId: opts.conversationId,
     role: inboundRole,
     content: opts.content,
     turnId,
+    imageStorageIds: inboundImageStorageIds.length > 0
+      ? (inboundImageStorageIds as never)
+      : undefined,
+    mediaError: opts.mediaError,
   });
   broadcast(opts.kind === "proactive" ? "proactive_notice" : "user_message", {
     conversationId: opts.conversationId,
@@ -306,9 +314,30 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     integrations.join(", ") || "(no integrations configured yet)",
   ).replace("{{FILESYSTEM_LINE}}", filesystemLine);
 
-  const prompt = historyBlock
-    ? `Prior turns:\n${historyBlock}\n\nCurrent message:\n${opts.content}`
+  const userText = opts.mediaError
+    ? `[user sent images but they couldn't be downloaded: ${opts.mediaError}]\n${opts.content}`
     : opts.content;
+  const promptBlocks = await buildPromptWithImages({
+    text: historyBlock
+      ? `Prior turns:\n${historyBlock}\n\nCurrent message:\n${userText}`
+      : userText,
+    imageStorageIds: inboundImageStorageIds,
+    fetchBytes: fetchStoredBytes,
+  });
+  // The SDK's query() only accepts string | AsyncIterable<SDKUserMessage>.
+  // When promptBlocks is a content-block array (images present), wrap it as
+  // an async generator that yields one SDKUserMessage with that content array.
+  const promptBody: string | AsyncIterable<{ type: "user"; session_id: string; message: { role: "user"; content: unknown }; parent_tool_use_id: null }> =
+    typeof promptBlocks === "string"
+      ? promptBlocks
+      : (async function* () {
+          yield {
+            type: "user" as const,
+            session_id: "",
+            message: { role: "user" as const, content: promptBlocks },
+            parent_tool_use_id: null,
+          };
+        })();
 
   const tag = opts.turnTag ?? turnId.slice(-6);
   const log = (msg: string) => console.log(`[turn ${tag}] ${msg}`);
@@ -330,7 +359,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
   let usage: UsageTotals = { ...EMPTY_USAGE };
   try {
     for await (const msg of query({
-      prompt,
+      prompt: promptBody,
       options: {
         systemPrompt,
         model: requestedModel,
