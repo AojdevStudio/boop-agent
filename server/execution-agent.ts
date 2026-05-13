@@ -95,7 +95,7 @@ export interface SpawnResult {
   status: "completed" | "failed" | "cancelled";
 }
 
-export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResult> {
+export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promise<SpawnResult> {
   const agentId = randomId("agent");
   const name = opts.name ?? (opts.integrations.join("+") || "general");
   const abort = new AbortController();
@@ -188,26 +188,27 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
   let errorMsg: string | undefined;
 
   const requestedModel = await getRuntimeModel();
-  const executionPrompt = await buildPromptWithImages({
-    text: opts.task,
-    imageStorageIds: opts.imageStorageIds,
-    fetchBytes: fetchStoredBytes,
-  });
-  // The SDK's query() only accepts string | AsyncIterable<SDKUserMessage>.
-  // When executionPrompt is a content-block array (images present), wrap it
-  // as an async generator that yields one SDKUserMessage with that content.
-  const executionPromptBody: string | AsyncIterable<{ type: "user"; session_id: string; message: { role: "user"; content: unknown }; parent_tool_use_id: null }> =
-    typeof executionPrompt === "string"
-      ? executionPrompt
-      : (async function* () {
-          yield {
-            type: "user" as const,
-            session_id: "",
-            message: { role: "user" as const, content: executionPrompt },
-            parent_tool_use_id: null,
-          };
-        })();
+
   try {
+    const executionPrompt = await buildPromptWithImages({
+      text: opts.task,
+      imageStorageIds: opts.imageStorageIds,
+      fetchBytes: fetchStoredBytes,
+    });
+    // The SDK's query() only accepts string | AsyncIterable<SDKUserMessage>.
+    // When executionPrompt is a content-block array (images present), wrap it
+    // as an async generator that yields one SDKUserMessage with that content.
+    const executionPromptBody: string | AsyncIterable<{ type: "user"; session_id: string; message: { role: "user"; content: unknown }; parent_tool_use_id: null }> =
+      typeof executionPrompt === "string"
+        ? executionPrompt
+        : (async function* () {
+            yield {
+              type: "user" as const,
+              session_id: "",
+              message: { role: "user" as const, content: executionPrompt },
+              parent_tool_use_id: null,
+            };
+          })();
     for await (const msg of query({
       prompt: executionPromptBody,
       options: {
