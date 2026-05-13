@@ -7,6 +7,7 @@ import { createDraftStagingMcp } from "./draft-tools.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeModel } from "./runtime-config.js";
 import { getWorkspace, makeWorkspaceCanUseTool } from "./workspace.js";
+import { buildPromptWithImages, fetchStoredBytes } from "./images/content-blocks.js";
 
 const running = new Map<string, AbortController>();
 
@@ -83,7 +84,10 @@ export interface SpawnOptions {
   integrations: string[];
   conversationId?: string;
   name?: string;
+  imageStorageIds?: string[];
 }
+
+export type SpawnExecutionAgentOpts = SpawnOptions;
 
 export interface SpawnResult {
   agentId: string;
@@ -184,9 +188,28 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
   let errorMsg: string | undefined;
 
   const requestedModel = await getRuntimeModel();
+  const executionPrompt = await buildPromptWithImages({
+    text: opts.task,
+    imageStorageIds: opts.imageStorageIds,
+    fetchBytes: fetchStoredBytes,
+  });
+  // The SDK's query() only accepts string | AsyncIterable<SDKUserMessage>.
+  // When executionPrompt is a content-block array (images present), wrap it
+  // as an async generator that yields one SDKUserMessage with that content.
+  const executionPromptBody: string | AsyncIterable<{ type: "user"; session_id: string; message: { role: "user"; content: unknown }; parent_tool_use_id: null }> =
+    typeof executionPrompt === "string"
+      ? executionPrompt
+      : (async function* () {
+          yield {
+            type: "user" as const,
+            session_id: "",
+            message: { role: "user" as const, content: executionPrompt },
+            parent_tool_use_id: null,
+          };
+        })();
   try {
     for await (const msg of query({
-      prompt: opts.task,
+      prompt: executionPromptBody,
       options: {
         systemPrompt: EXECUTION_SYSTEM,
         model: requestedModel,
@@ -321,6 +344,9 @@ export function runningAgentIds(): string[] {
 export async function retryAgent(agentId: string): Promise<SpawnResult | null> {
   const existing = await convex.query(api.agents.get, { agentId });
   if (!existing) return null;
+  // V1 limitation: image refs are not persisted to executionAgents and
+  // therefore are not replayed on retry. Re-trigger from the original
+  // turn if you need the image inputs.
   return await spawnExecutionAgent({
     task: existing.task,
     integrations: existing.mcpServers,

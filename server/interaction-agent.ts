@@ -194,6 +194,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
 
   const inboundRole = opts.kind === "proactive" ? "system" : "user";
   const inboundImageStorageIds = (opts.images ?? []).map((i) => i.storageId);
+  const inboundImageStorageIdsForPrompt = inboundImageStorageIds;
   await convex.mutation(api.messages.send, {
     conversationId: opts.conversationId,
     role: inboundRole,
@@ -266,7 +267,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     tools: [
       tool(
         "spawn_agent",
-        "Spawn a focused sub-agent to do real work using external tools. Returns the agent's final answer. Use for anything requiring lookups, drafting, or actions in the user's integrations.",
+        "Spawn a focused sub-agent to do real work using external tools. Returns the agent's final answer. Use for anything requiring lookups, drafting, or actions in the user's integrations. If the current user message includes images and the sub-agent's task depends on them, pass the relevant storage IDs in imageRefs.",
         {
           task: z
             .string()
@@ -275,6 +276,11 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
             .array(z.string())
             .describe(`Which integrations to give the agent. Available: ${integrations.join(", ") || "(none)"}`),
           name: z.string().optional().describe("Short label for the agent."),
+          imageRefs: z
+            .array(z.string())
+            .optional()
+            .describe("Convex storage IDs from the user's current message. Available in this turn: " +
+              (inboundImageStorageIdsForPrompt.length > 0 ? inboundImageStorageIdsForPrompt.join(", ") : "(none)")),
         },
         async (args) => {
           const res = await spawnExecutionAgent({
@@ -282,6 +288,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
             integrations: args.integrations,
             conversationId: opts.conversationId,
             name: args.name,
+            imageStorageIds: args.imageRefs,
           });
           return {
             content: [
