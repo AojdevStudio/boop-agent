@@ -5,6 +5,8 @@ import type { IntegrationModule } from "./integrations/registry.js";
 
 export type ToolkitAuthMode = "managed" | "byo";
 
+export const COMPOSIO_DASHBOARD_URL = "https://dashboard.composio.dev";
+
 export interface CuratedToolkit {
   slug: string;
   displayName: string;
@@ -46,6 +48,10 @@ export const CURATED_TOOLKITS: CuratedToolkit[] = [
 ];
 
 const DISPLAY_NAME_BY_SLUG = new Map(CURATED_TOOLKITS.map((t) => [t.slug, t.displayName]));
+
+export function isCuratedSlug(slug: string): boolean {
+  return DISPLAY_NAME_BY_SLUG.has(slug);
+}
 
 let singleton: Composio<ClaudeAgentSDKProvider> | null = null;
 
@@ -288,11 +294,7 @@ async function fetchToolkitIdentity(
       // (newest) email — even when distinct accounts are connected.
       ...(connectedAccountId ? { connectedAccountId } : {}),
       arguments: spec.arguments,
-      // Composio's tools.execute requires a pinned toolkit version OR this
-      // flag. We skip pinning so a toolkit bump doesn't break identity lookup
-      // silently — missed fields fall through to the identityCache/alias
-      // fallback chain in getIdentityFor. Revisit if Composio deprecates the
-      // flag.
+      // Skip version pinning; missed fields fall through to identityCache/alias chain.
       dangerouslySkipVersionCheck: true,
     });
     if (!result.successful || !result.data) return {};
@@ -373,10 +375,7 @@ function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   try {
     const parts = jwt.split(".");
     if (parts.length < 2) return null;
-    const payload = parts[1]!;
-    const padded = payload + "===".slice((payload.length + 3) % 4);
-    const b64 = padded.replace(/-/g, "+").replace(/_/g, "/");
-    const json = Buffer.from(b64, "base64").toString("utf-8");
+    const json = Buffer.from(parts[1]!, "base64url").toString("utf-8");
     return JSON.parse(json) as Record<string, unknown>;
   } catch {
     return null;
@@ -446,16 +445,51 @@ export async function renameConnection(connectionId: string, alias: string): Pro
 }
 
 export class ComposioNeedsAuthConfigError extends Error {
-  constructor(
-    public readonly slug: string,
-    public readonly underlying: string,
-  ) {
+  constructor(public readonly slug: string) {
     super(
       `Toolkit "${slug}" needs an auth config — Composio doesn't host a managed OAuth app for it. ` +
         `Add it via the Composio Dashboard: Toolkits → search ${slug} → Add to project → paste your OAuth credentials. ` +
-        `https://dashboard.composio.dev`,
+        `${COMPOSIO_DASHBOARD_URL}`,
     );
     this.name = "ComposioNeedsAuthConfigError";
+  }
+}
+
+// Count active connections for a slug without enriching identities — the heavy
+// path in listConnectedToolkits triggers per-connection whoami API calls.
+export async function countActiveConnections(slug: string): Promise<number> {
+  const composio = getComposio();
+  if (!composio) return 0;
+  try {
+    const resp = await composio.connectedAccounts.list({
+      userIds: [boopUserId()],
+      toolkitSlugs: [slug],
+      statuses: ["ACTIVE"],
+      limit: 200,
+    });
+    return resp.items.length;
+  } catch (err) {
+    console.error(`[composio] countActiveConnections(${slug}) failed`, err);
+    return 0;
+  }
+}
+
+// Distinct toolkit slugs the user has any active connection for. Used at boot
+// to register integration modules without paying the identity-enrichment cost
+// of listConnectedToolkits.
+export async function listActiveToolkitSlugs(): Promise<string[]> {
+  const composio = getComposio();
+  if (!composio) return [];
+  try {
+    const resp = await composio.connectedAccounts.list({
+      userIds: [boopUserId()],
+      statuses: ["ACTIVE"],
+      limit: 200,
+    });
+    return [...new Set(resp.items.map((it) => it.toolkit.slug))];
+  } catch (err) {
+    console.error("[composio] listActiveToolkitSlugs failed", err);
+    return [];
   }
 }
 
@@ -466,11 +500,8 @@ export async function authorizeToolkit(
   const composio = getComposio();
   if (!composio) throw new Error("COMPOSIO_API_KEY not set");
 
-  // 1. Find or create an auth config for the toolkit. session.authorize doesn't
-  //    auto-discover or auto-create — we have to pass an authConfigId explicitly
-  //    to connectedAccounts.initiate. That's why a manually-added BYO config in
-  //    the dashboard would still trip "require auth configs but none exist" on
-  //    the previous session.authorize-based code path.
+  // 1. Find or create an auth config for the toolkit. Must pass authConfigId
+  //    explicitly to connectedAccounts.initiate.
   let authConfigId: string;
   const existingConfig = (await composio.authConfigs.list({ toolkit: slug })).items[0];
   if (existingConfig) {
@@ -488,7 +519,8 @@ export async function authorizeToolkit(
       // the Composio Dashboard (Toolkits → search → Add to project).
       const status = (err as { status?: number })?.status;
       if (status === 400) {
-        throw new ComposioNeedsAuthConfigError(slug, String(err));
+        console.warn(`[composio] authConfigs.create(${slug}) returned 400; assuming BYO required`, err);
+        throw new ComposioNeedsAuthConfigError(slug);
       }
       throw err;
     }
@@ -496,11 +528,9 @@ export async function authorizeToolkit(
 
   // 2. Initiate the connection. allowMultiple if there's already an active connection
   //    so we add another account instead of replacing.
-  const existing = (await listConnectedToolkits()).filter(
-    (c) => c.slug === slug && c.status === "ACTIVE",
-  );
+  const activeCount = await countActiveConnections(slug);
   const conn = await composio.connectedAccounts.initiate(boopUserId(), authConfigId, {
-    ...(existing.length > 0 ? { allowMultiple: true } : {}),
+    ...(activeCount > 0 ? { allowMultiple: true } : {}),
     ...(opts?.callbackUrl ? { callbackUrl: opts.callbackUrl } : {}),
     ...(opts?.alias ? { alias: opts.alias } : {}),
   });
@@ -523,16 +553,11 @@ export function buildComposioIntegrationModule(slug: string): IntegrationModule 
       if (!composio) {
         throw new Error(`[composio] cannot build ${slug} — COMPOSIO_API_KEY not set`);
       }
-      // If the user has 2+ active connections for this toolkit, force Composio to
-      // require explicit account selection per tool call — otherwise it silently
-      // picks the default account.
-      const activeCount = (await listConnectedToolkits()).filter(
-        (c) => c.slug === slug && c.status === "ACTIVE",
-      ).length;
-      // Look up the auth config explicitly. Without this, composio.create() tries
-      // to auto-create one and 400s for BYO toolkits (Twitter etc.) that don't
-      // have a managed OAuth app available — error message even names the fix:
-      // "Please specify them in auth_configs."
+      // 2+ active accounts: require explicit per-call selection (otherwise Composio
+      // silently picks the default account).
+      const activeCount = await countActiveConnections(slug);
+      // Pass authConfigId explicitly so composio.create() doesn't try to auto-create
+      // one and 400 for BYO toolkits (Twitter etc.) without a managed OAuth app.
       const authConfig = (await composio.authConfigs.list({ toolkit: slug })).items[0];
       const session = await composio.create(boopUserId(), {
         toolkits: [slug],

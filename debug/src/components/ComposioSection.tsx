@@ -40,6 +40,13 @@ function hasActive(t: Toolkit): boolean {
   return t.connections.some((c) => c.status === "ACTIVE");
 }
 
+function pickSecondary(conn: Connection, primary: string): string | null {
+  if (!conn.accountEmail) return null;
+  if (conn.alias) return conn.accountEmail;
+  if (conn.accountName && primary !== conn.accountEmail) return conn.accountEmail;
+  return null;
+}
+
 const STATUS_COLORS: Record<string, { dot: string; label: string; badge: string }> = {
   ACTIVE: {
     dot: "bg-emerald-400",
@@ -242,17 +249,10 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
       setToast(null);
     }, TOAST_TIMEOUT_MS);
   }, []);
-  useEffect(
-    () => () => {
-      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    },
-    [],
-  );
-  // OAuth popup polling interval — kept in a ref so we can clear it on unmount
-  // (prevents an orphan interval firing fetches after the panel closes).
   const authPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(
     () => () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
       if (authPollRef.current) clearInterval(authPollRef.current);
     },
     [],
@@ -310,7 +310,6 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
           "composio-auth",
           `width=${w},height=${h},left=${left},top=${top}`,
         );
-        // Replace any prior poll (defensive — you'd have to spam Connect for this to matter).
         if (authPollRef.current) clearInterval(authPollRef.current);
         authPollRef.current = setInterval(async () => {
           if (!popup || popup.closed) {
@@ -691,16 +690,14 @@ function ConnectionRow({
 }) {
   const status = STATUS_COLORS[(conn.status ?? "").toUpperCase()] ?? STATUS_COLORS.INACTIVE;
   const primary = conn.alias || conn.accountLabel || conn.accountEmail || conn.accountName || `Account ${index + 1}`;
-  const secondary =
-    conn.alias && conn.accountEmail
-      ? conn.accountEmail
-      : conn.accountName && conn.accountEmail && primary !== conn.accountEmail
-        ? conn.accountEmail
-        : null;
+  const secondary = pickSecondary(conn, primary);
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conn.alias ?? "");
   const [saving, setSaving] = useState(false);
+  // Synchronous re-entry guard — `saving` is a closure-captured state value
+  // that won't reflect setSaving(true) within the same React event tick, so a
+  // blur+Enter pair firing in one tick could double-submit without the ref.
   const submittingRef = useRef(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const startEdit = () => {
