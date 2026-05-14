@@ -278,14 +278,38 @@ export async function ingestSendblueImage(
     res.body?.cancel().catch(() => undefined);
     return { ok: false, reason: check.reason };
   }
+  // Stream the body so we can abort early when the running total exceeds
+  // MAX_IMAGE_BYTES — content-length is often absent on CDN/redirect
+  // responses, and `await res.arrayBuffer()` would otherwise buffer the
+  // entire payload before any cap check fires.
   let buf: ArrayBuffer;
   try {
-    buf = await res.arrayBuffer();
+    const reader = res.body?.getReader();
+    if (!reader) return { ok: false, reason: "download failed: no body" };
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_IMAGE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return {
+          ok: false,
+          reason: `image too large: >${MAX_IMAGE_BYTES} bytes`,
+        };
+      }
+      chunks.push(value);
+    }
+    buf = new ArrayBuffer(total);
+    const view = new Uint8Array(buf);
+    let offset = 0;
+    for (const c of chunks) {
+      view.set(c, offset);
+      offset += c.byteLength;
+    }
   } catch (err) {
     return { ok: false, reason: `download failed: ${String(err)}` };
-  }
-  if (buf.byteLength > MAX_IMAGE_BYTES) {
-    return { ok: false, reason: `image too large: ${buf.byteLength} bytes` };
   }
 
   try {
