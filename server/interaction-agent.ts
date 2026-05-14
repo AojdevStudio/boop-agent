@@ -293,12 +293,20 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
               (inboundImageStorageIdsForPrompt.length > 0 ? inboundImageStorageIdsForPrompt.join(", ") : "(none)")),
         },
         async (args) => {
+          // Only forward storage IDs that were actually attached to the
+          // current inbound turn — guards against the dispatcher passing a
+          // hallucinated or stale ref, which would otherwise fail the
+          // spawn mid-run when fetchStoredBytes can't resolve it.
+          const allowedRefs = args.imageRefs?.filter((id) =>
+            inboundImageStorageIds.includes(id),
+          );
           const res = await spawnExecutionAgent({
             task: args.task,
             integrations: args.integrations,
             conversationId: opts.conversationId,
             name: args.name,
-            imageStorageIds: args.imageRefs,
+            imageStorageIds:
+              allowedRefs && allowedRefs.length > 0 ? allowedRefs : undefined,
           });
           return {
             content: [
@@ -419,10 +427,12 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           "Bash",
           "Write",
           "Edit",
+          "MultiEdit",
           "Grep",
           "Agent",
           ...(sandboxDisallowedRemoval.has("Read") ? [] : ["Read"]),
           ...(sandboxDisallowedRemoval.has("Glob") ? [] : ["Glob"]),
+          ...(sandboxDisallowedRemoval.has("LS") ? [] : ["LS"]),
           "Skill",
         ],
         permissionMode: "bypassPermissions",
