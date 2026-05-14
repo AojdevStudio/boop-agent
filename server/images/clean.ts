@@ -2,13 +2,28 @@ import { api } from "../../convex/_generated/api.js";
 import { convex } from "../convex-client.js";
 
 const DEFAULT_RETENTION_DAYS = 3;
+const DEFAULT_INTERVAL_MS = 12 * 60 * 60 * 1000;
+
+function parseEnvNumber(
+  name: string,
+  fallback: number,
+  opts: { min: number; integer?: boolean } = { min: 0 },
+): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < opts.min) {
+    console.warn(`[image-cleanup] ignoring invalid ${name}="${raw}", using ${fallback}`);
+    return fallback;
+  }
+  return opts.integer ? Math.floor(n) : n;
+}
 
 export function getImageRetentionDays(): number {
-  const raw = process.env.BOOP_IMAGE_RETENTION_DAYS;
-  if (raw === undefined) return DEFAULT_RETENTION_DAYS;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n < 0) return DEFAULT_RETENTION_DAYS;
-  return Math.floor(n);
+  return parseEnvNumber("BOOP_IMAGE_RETENTION_DAYS", DEFAULT_RETENTION_DAYS, {
+    min: 0,
+    integer: true,
+  });
 }
 
 // Hard cap on how many expired rows we scan in one cleanup invocation. The
@@ -37,32 +52,31 @@ export async function runImageCleanup(): Promise<{ deleted: number; kept: number
       nextAfterMs: number;
     };
 
-    for (const msg of result.rows) {
-      const ids = msg.imageStorageIds ?? [];
-      for (const storageId of ids) {
-        // TODO(codegen): drop cast once schema push regenerates Convex API.
-        const anchored = await convex.query(api.memoryRecords.hasImageRef, {
-          storageId: storageId as never,
-        });
-        if (anchored) {
-          kept++;
-          continue;
-        }
-        // TODO(codegen): drop cast once schema push regenerates Convex API.
+    const pairs = result.rows.flatMap((msg) =>
+      (msg.imageStorageIds ?? []).map((storageId) => ({ messageId: msg._id, storageId })),
+    );
+    // TODO(codegen): drop casts once schema push regenerates Convex API.
+    const anchored = await Promise.all(
+      pairs.map((p) =>
+        convex.query(api.memoryRecords.hasImageRef, { storageId: p.storageId as never }),
+      ),
+    );
+    const toDelete = pairs.filter((_, i) => !anchored[i]);
+    kept += pairs.length - toDelete.length;
+    await Promise.all(
+      toDelete.map(async (p) => {
         await convex.mutation(api.messages.deleteImageBytes, {
-          storageId: storageId as never,
+          storageId: p.storageId as never,
         });
-        // TODO(codegen): drop cast once schema push regenerates Convex API.
         await convex.mutation(api.messages.clearMessageImage, {
-          messageId: msg._id as never,
-          storageId: storageId as never,
+          messageId: p.messageId as never,
+          storageId: p.storageId as never,
         });
-        deleted++;
-      }
-    }
+      }),
+    );
+    deleted += toDelete.length;
 
     if (!result.hasMore) break;
-    // Without forward progress the loop would spin; defensive.
     if (result.nextAfterMs <= afterMs) break;
     afterMs = result.nextAfterMs;
   }
@@ -75,14 +89,9 @@ export function startImageCleanup(): () => void {
     console.log("[image-cleanup] disabled (BOOP_IMAGE_RETENTION_DAYS=0)");
     return () => undefined;
   }
-  const rawIntervalMs = process.env.BOOP_IMAGE_CLEANUP_INTERVAL_MS;
-  const parsed = rawIntervalMs === undefined ? 12 * 60 * 60 * 1000 : Number(rawIntervalMs);
-  const intervalMs = Number.isFinite(parsed) && parsed > 0 ? parsed : 12 * 60 * 60 * 1000;
-  if (rawIntervalMs !== undefined && intervalMs !== Number(rawIntervalMs)) {
-    console.warn(
-      `[image-cleanup] ignoring invalid BOOP_IMAGE_CLEANUP_INTERVAL_MS="${rawIntervalMs}", falling back to 12h`,
-    );
-  }
+  const intervalMs = parseEnvNumber("BOOP_IMAGE_CLEANUP_INTERVAL_MS", DEFAULT_INTERVAL_MS, {
+    min: 1,
+  });
   console.log(
     `[image-cleanup] enabled (retention=${getImageRetentionDays()}d, interval=${intervalMs}ms)`,
   );

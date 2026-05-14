@@ -1,13 +1,15 @@
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB
 
-export const ALLOWED_IMAGE_MIME = new Set([
+export const ALLOWED_IMAGE_MIME_LIST = [
   "image/jpeg",
   "image/png",
   "image/webp",
   "image/gif",
-]);
+] as const;
 
-export type ImageMediaType = "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+export type ImageMediaType = (typeof ALLOWED_IMAGE_MIME_LIST)[number];
+
+export const ALLOWED_IMAGE_MIME: ReadonlySet<string> = new Set(ALLOWED_IMAGE_MIME_LIST);
 
 export type ImageHeaderCheck =
   | { ok: true; mediaType: ImageMediaType }

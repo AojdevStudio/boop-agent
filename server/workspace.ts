@@ -12,7 +12,7 @@ export interface WorkspaceConfig {
 }
 
 export interface ResolveWorkspaceOpts {
-  mode?: WorkspaceMode | string;
+  mode?: WorkspaceMode;
   dir?: string;
 }
 
@@ -36,7 +36,6 @@ export function resolveWorkspace(
     opts.dir ?? process.env.BOOP_WORKSPACE_DIR ?? "~/boop-workspace";
   const expanded = path.resolve(expandHome(rawDir));
 
-  // `full` and `off` don't validate the workspace dir — they don't use it.
   if (mode !== "sandbox") {
     return {
       mode,
@@ -72,8 +71,7 @@ export function resolveWorkspace(
     : canonical + path.sep;
 
   const isPathInWorkspace = (candidate: string): boolean => {
-    if (typeof candidate !== "string" || candidate.length === 0) return false;
-    if (candidate.includes("\x00")) return false;
+    if (candidate.length === 0 || candidate.includes("\x00")) return false;
     let resolved: string;
     try {
       resolved = path.resolve(canonical, candidate);
