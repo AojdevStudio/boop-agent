@@ -111,7 +111,12 @@ export const metrics = query({
 export const imageStorageStats = query({
   args: {},
   handler: async (ctx) => {
-    const msgs = await ctx.db.query("messages").collect();
+    // Capped scan like the other dashboard queries — unbounded .collect()
+    // would silently truncate at Convex's row ceiling.
+    const msgs = await ctx.db
+      .query("messages")
+      .order("desc")
+      .take(METRICS_SCAN_LIMIT);
     const seen = new Set<string>();
     let count = 0;
     for (const m of msgs) {
@@ -121,6 +126,6 @@ export const imageStorageStats = query({
         count++;
       }
     }
-    return { count };
+    return { count, truncated: msgs.length === METRICS_SCAN_LIMIT };
   },
 });

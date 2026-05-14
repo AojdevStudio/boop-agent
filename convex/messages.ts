@@ -73,17 +73,35 @@ export const getStorageUrl = query({
 });
 
 export const expiredWithImages = query({
-  args: { olderThanMs: v.number(), limit: v.optional(v.number()) },
+  args: {
+    olderThanMs: v.number(),
+    afterMs: v.optional(v.number()),
+    scanLimit: v.optional(v.number()),
+  },
   handler: async (ctx, args) => {
-    const cutoff = args.olderThanMs;
+    // Cursor-based pagination over the by_createdAt index. The caller scans
+    // pages until either no more expired rows exist or it has enough image
+    // rows. Filtering after take is unavoidable (Convex can't index on an
+    // array's emptiness), but pagination via the index makes that filter a
+    // bounded-cost step instead of a silent dropout.
+    const scanLimit = args.scanLimit ?? 200;
+    const after = args.afterMs ?? 0;
     const rows = await ctx.db
       .query("messages")
-      .withIndex("by_createdAt", (q) => q.lt("createdAt", cutoff))
+      .withIndex("by_createdAt", (q) =>
+        q.gt("createdAt", after).lt("createdAt", args.olderThanMs),
+      )
       .order("asc")
-      .take(args.limit ?? 200);
-    return rows.filter(
+      .take(scanLimit);
+    const imageRows = rows.filter(
       (r) => Array.isArray(r.imageStorageIds) && r.imageStorageIds.length > 0,
     );
+    // hasMore = the scan filled its budget; the caller may need another page.
+    return {
+      rows: imageRows,
+      hasMore: rows.length === scanLimit,
+      nextAfterMs: rows.length > 0 ? rows[rows.length - 1].createdAt : after,
+    };
   },
 });
 
