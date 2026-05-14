@@ -15,6 +15,9 @@ beforeAll(() => {
   writeFileSync(join(outside, "outside.txt"), "y");
   // Symlink inside workspace pointing OUT of it — must be detected.
   symlinkSync(join(outside, "outside.txt"), join(workspaceRoot, "evil-link"));
+  // Symlinked DIRECTORY whose target is outside — covers the
+  // "non-existent leaf under symlinked parent" escape case.
+  symlinkSync(outside, join(workspaceRoot, "evil-dir-link"));
   // Inner real subdir to confirm legit nested paths pass.
   mkdirSync(join(workspaceRoot, "sub"));
 });
@@ -52,6 +55,14 @@ describe("isPathInWorkspace", () => {
   });
   it("rejects a symlink that resolves outside the workspace", () => {
     expect(ws().isPathInWorkspace(join(workspaceRoot, "evil-link"))).toBe(false);
+  });
+  it("rejects a non-existent file whose parent symlinks outside the workspace", () => {
+    // Regression for the symlinked-parent + non-existent-leaf escape:
+    // existsSync(<leaf>) is false so realpathSync isn't called; without
+    // walking up to the symlinked parent, the prefix check would pass.
+    expect(
+      ws().isPathInWorkspace(join(workspaceRoot, "evil-dir-link", "newfile.txt")),
+    ).toBe(false);
   });
   it("rejects empty string", () => {
     expect(ws().isPathInWorkspace("")).toBe(false);

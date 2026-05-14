@@ -77,7 +77,23 @@ export function resolveWorkspace(
     let resolved: string;
     try {
       resolved = path.resolve(canonical, candidate);
-      if (existsSync(resolved)) resolved = realpathSync(resolved);
+      if (existsSync(resolved)) {
+        resolved = realpathSync(resolved);
+      } else {
+        // Walk up to the nearest existing ancestor and canonicalize it so a
+        // symlinked parent can't smuggle a not-yet-created file out of root.
+        // Without this, `ln -s /etc ws/link` + `Write ws/link/x` would pass
+        // the prefix check because `ws/link/x` doesn't exist for realpathSync
+        // to dereference.
+        const remainder: string[] = [];
+        let ancestor = resolved;
+        while (!existsSync(ancestor) && path.dirname(ancestor) !== ancestor) {
+          remainder.unshift(path.basename(ancestor));
+          ancestor = path.dirname(ancestor);
+        }
+        const realAncestor = existsSync(ancestor) ? realpathSync(ancestor) : ancestor;
+        resolved = remainder.length > 0 ? path.join(realAncestor, ...remainder) : realAncestor;
+      }
     } catch {
       return false;
     }
@@ -114,22 +130,18 @@ export function makeWorkspaceCanUseTool(
     if (!PATH_GUARDED_TOOLS.has(toolName)) {
       return { behavior: "allow", updatedInput: input };
     }
-    const pathArg =
-      typeof input.path === "string"
-        ? input.path
-        : typeof input.file_path === "string"
-        ? input.file_path
-        : typeof input.pattern === "string"
-        ? input.pattern
-        : undefined;
-    if (!pathArg) {
-      return { behavior: "allow", updatedInput: input };
-    }
-    if (!isPathInWorkspace(pathArg)) {
-      return {
-        behavior: "deny",
-        message: `path outside workspace: ${pathArg} — workspace is rooted at ${workspaceRoot}`,
-      };
+    // Glob/Grep can carry BOTH a `path` (search root) AND a `pattern`. Check
+    // every path-shaped field — picking just the first match lets a hostile
+    // model pass a workspace `path` plus a `/etc/**` `pattern` through.
+    for (const key of ["path", "file_path", "pattern"] as const) {
+      const v = (input as Record<string, unknown>)[key];
+      if (typeof v !== "string" || v.length === 0) continue;
+      if (!isPathInWorkspace(v)) {
+        return {
+          behavior: "deny",
+          message: `path outside workspace: ${v} — workspace is rooted at ${workspaceRoot}`,
+        };
+      }
     }
     return { behavior: "allow", updatedInput: input };
   };
