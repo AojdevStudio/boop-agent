@@ -1,16 +1,19 @@
 import express from "express";
 import {
   authorizeToolkit,
+  COMPOSIO_DASHBOARD_URL,
   ComposioNeedsAuthConfigError,
   CURATED_TOOLKITS,
   disconnectToolkit,
   displayNameFor,
   getComposio,
+  isCuratedSlug,
   listConnectedToolkits,
   listToolkitMeta,
   listToolkitSlugsWithAuthConfig,
   listToolsForToolkit,
   renameConnection,
+  type ToolkitAuthMode,
 } from "./composio.js";
 import { refreshIntegrations } from "./integrations/registry.js";
 import { getStoredWebhookSecret } from "./composio-webhook.js";
@@ -69,14 +72,13 @@ export function createComposioRouter(): express.Router {
       });
 
       const extras = [...connectionsBySlug.entries()]
-        .filter(([slug]) => !CURATED_TOOLKITS.some((t) => t.slug === slug))
+        .filter(([slug]) => !isCuratedSlug(slug))
         .map(([slug, conns]) => {
           const m = meta.get(slug);
-          // Non-curated toolkit — we don't actually know its auth mode from
-          // here. Infer: if an auth config exists on this account, the user
-          // set it up themselves (BYO). Otherwise assume managed (it got
-          // connected without one, which only works for Composio-managed).
-          const authMode: "managed" | "byo" = configured.has(slug) ? "byo" : "managed";
+          // Non-curated toolkit: infer auth mode. If an auth config exists, the
+          // user set it up themselves (BYO). Otherwise assume managed (the
+          // connection succeeded without one, which only works for Composio-managed).
+          const authMode: ToolkitAuthMode = configured.has(slug) ? "byo" : "managed";
           return {
             slug,
             displayName: m?.name ?? displayNameFor(slug),
@@ -119,7 +121,7 @@ export function createComposioRouter(): express.Router {
           error: err.message,
           needsAuthConfig: true,
           toolkit: slug,
-          setupUrl: `https://dashboard.composio.dev`,
+          setupUrl: COMPOSIO_DASHBOARD_URL,
         });
         return;
       }
@@ -231,10 +233,6 @@ export function createComposioRouter(): express.Router {
       }
       // Ack immediately; dispatch is fire-and-forget.
       res.json({ ok: true });
-      // Defensive null-guard: verifyWebhook normally throws on bad
-      // signature, but if a future SDK version resolves with a falsy /
-      // payload-less result instead, accessing verified.payload would crash
-      // post-ack and surface as an unhandled rejection.
       const payload = verified?.payload;
       if (!payload) {
         console.warn("[composio-webhook] verified result had no payload; skipping dispatch");
