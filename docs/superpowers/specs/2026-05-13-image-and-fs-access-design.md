@@ -114,7 +114,7 @@ System prompt update:
 - Exports:
   - `WORKSPACE_MODE: "off" | "sandbox" | "full"`
   - `WORKSPACE_ROOT: string` (absolute, canonicalized)
-  - `isPathInWorkspace(p: string): boolean` — resolves the input via `path.resolve` then `realpathSync` then checks prefix-match against `WORKSPACE_ROOT`. Symlinks resolve before the check; null bytes and parent-traversal sequences are handled by `path.resolve`.
+  - `isPathInWorkspace(p: string): boolean` — explicit null-byte and empty-string rejection up front, then `path.resolve` (collapses `..` sequences) plus `realpathSync` (dereferences symlinks) on the candidate or its nearest existing ancestor, then prefix-match against `WORKSPACE_ROOT`. The ancestor walk-up matters: without it, a not-yet-created leaf under a symlinked parent would skip canonicalization and pass the prefix check.
 - If mode is `sandbox` and the workspace dir cannot be read/written, the module throws at import time and the server refuses to boot. No half-enabled states.
 
 ### 6.2 Execution agent (`server/execution-agent.ts`)
