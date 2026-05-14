@@ -695,6 +695,10 @@ function ConnectionRow({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conn.alias ?? "");
   const [saving, setSaving] = useState(false);
+  // Synchronous re-entry guard — `saving` is a closure-captured state value
+  // that won't reflect setSaving(true) within the same React event tick, so a
+  // blur+Enter pair firing in one tick could double-submit without the ref.
+  const submittingRef = useRef(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const startEdit = () => {
     setDraft(conn.alias ?? "");
@@ -705,15 +709,17 @@ function ConnectionRow({
     setDraft(conn.alias ?? "");
   };
   const submit = async () => {
-    if (saving) return;
+    if (submittingRef.current) return;
     const alias = draft.trim();
     if (!alias || alias === (conn.alias ?? "")) {
       cancelEdit();
       return;
     }
+    submittingRef.current = true;
     setSaving(true);
     const ok = await onRename(conn.id, alias);
     setSaving(false);
+    submittingRef.current = false;
     if (ok) setEditing(false);
   };
   useEffect(() => {

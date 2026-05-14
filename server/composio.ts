@@ -465,6 +465,7 @@ export async function countActiveConnections(slug: string): Promise<number> {
       userIds: [boopUserId()],
       toolkitSlugs: [slug],
       statuses: ["ACTIVE"],
+      limit: 200,
     });
     return resp.items.length;
   } catch (err) {
@@ -483,6 +484,7 @@ export async function listActiveToolkitSlugs(): Promise<string[]> {
     const resp = await composio.connectedAccounts.list({
       userIds: [boopUserId()],
       statuses: ["ACTIVE"],
+      limit: 200,
     });
     return [...new Set(resp.items.map((it) => it.toolkit.slug))];
   } catch (err) {
@@ -517,6 +519,7 @@ export async function authorizeToolkit(
       // the Composio Dashboard (Toolkits → search → Add to project).
       const status = (err as { status?: number })?.status;
       if (status === 400) {
+        console.warn(`[composio] authConfigs.create(${slug}) returned 400; assuming BYO required`, err);
         throw new ComposioNeedsAuthConfigError(slug);
       }
       throw err;

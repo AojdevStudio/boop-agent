@@ -75,15 +75,16 @@ export function createComposioRouter(): express.Router {
         .filter(([slug]) => !isCuratedSlug(slug))
         .map(([slug, conns]) => {
           const m = meta.get(slug);
+          const hasAuthConfig = configured.has(slug);
           // Non-curated toolkit: infer auth mode. If an auth config exists, the
           // user set it up themselves (BYO). Otherwise assume managed (the
           // connection succeeded without one, which only works for Composio-managed).
-          const authMode: ToolkitAuthMode = configured.has(slug) ? "byo" : "managed";
+          const authMode: ToolkitAuthMode = hasAuthConfig ? "byo" : "managed";
           return {
             slug,
             displayName: m?.name ?? displayNameFor(slug),
             authMode,
-            hasAuthConfig: configured.has(slug),
+            hasAuthConfig,
             logoUrl: m?.logo ?? null,
             description: m?.description ?? null,
             toolCount: m?.toolsCount ?? null,
