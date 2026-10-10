@@ -1,0 +1,28 @@
+{
+  "source": "/volume1/projects/agents/boop-agent",
+  "original_head": "4105f948ef63122dbeb2972631ac655ecfe90805",
+  "original_refs": [
+    [
+      "refs/heads/main",
+      "4105f948ef63122dbeb2972631ac655ecfe90805",
+      "commit"
+    ],
+    [
+      "refs/remotes/origin/HEAD",
+      "4105f948ef63122dbeb2972631ac655ecfe90805",
+      "commit"
+    ],
+    [
+      "refs/remotes/origin/main",
+      "4105f948ef63122dbeb2972631ac655ecfe90805",
+      "commit"
+    ],
+    [
+      "refs/remotes/upstream/main",
+      "b5c7d52c5e8e5b375d34d224ad1e4e0fb80cfe08",
+      "commit"
+    ]
+  ],
+  "stashes": [],
+  "excluded_new_files": []
+}

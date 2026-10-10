@@ -26,6 +26,8 @@ export function getIntegration(name: string): IntegrationModule | undefined {
 }
 
 export async function loadIntegrations(): Promise<void> {
+  const { localMessagesIntegration } = await import("./local-messages.js");
+  registerIntegration(localMessagesIntegration);
   const { registerComposioToolkits } = await import("./composio-loader.js");
   await registerComposioToolkits();
   const loaded = [...registry.keys()];

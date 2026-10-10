@@ -1,0 +1,3 @@
+# Local Messages sends require token-backed approval
+
+Boop will let execution agents read from the user's local macOS Messages inbox through a Local Messages Integration, but sending is externally visible and higher-risk. We decided local message sends must pass through the existing draft flow plus a hard approval gate: after the user explicitly confirms over iMessage, only the Interaction Agent may create a short-lived Approval Token, and the Local Messages send tool must verify the draft id, token, recipient, exact message text hash, attachment list/hash, and expiry before calling `imsg send`. This keeps the conversational UX while preventing an Execution Agent from self-approving or mutating a draft after approval.
